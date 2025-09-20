@@ -1,3 +1,7 @@
 streamlit
 streamlit-ketcher
 rdkit-pypi
+rdkit
+pandas
+requests
+aiohttp
