@@ -1,7 +1,8 @@
 streamlit
-streamlit-ketcher
-rdkit-pypi
-rdkit
+numpy==1.26.4
+rdkit-pypi==2022.9.5
 pandas
 requests
+urllib3
+typing-extensions
 aiohttp

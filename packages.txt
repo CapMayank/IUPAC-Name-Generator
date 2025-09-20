@@ -1,0 +1,6 @@
+libxrender1
+patchelf
+libxext6
+libsm6
+libxft2
+fontconfig
