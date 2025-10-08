@@ -7,3 +7,6 @@ urllib3
 typing-extensions
 aiohttp
 streamlit-ketcher
+stmol==0.0.9
+py3Dmol==2.0.0.post2
+ipython_genutils

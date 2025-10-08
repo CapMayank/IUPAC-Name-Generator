@@ -16,6 +16,9 @@ import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 import io
 import base64
+from stmol import showmol
+import py3Dmol
+from rdkit.Chem import AllChem
 
 
 # Try to import streamlit_ketcher, provide fallback if not available
@@ -24,6 +27,15 @@ try:
     KETCHER_AVAILABLE = True
 except ImportError:
     KETCHER_AVAILABLE = False
+
+# Add these imports after your existing imports
+try:
+    from stmol import showmol
+    import py3Dmol
+    PY3DMOL_AVAILABLE = True
+except ImportError:
+    PY3DMOL_AVAILABLE = False
+
 
 
 # ==============================================================================
@@ -146,6 +158,193 @@ def validate_and_standardize_smiles(smiles: str) -> Tuple[bool, str, Optional[st
 
     except Exception as e:
         return False, smiles, f"Validation error: {str(e)}"
+    
+
+@st.cache_data(show_spinner=False)
+def generate_3d_structure(smiles: str) -> Optional[str]:
+    """
+    Generate 3D coordinates for a molecule from SMILES
+    Returns MOL block format for py3Dmol visualization
+    """
+    try:
+        # Parse SMILES
+        mol = Chem.MolFromSmiles(smiles)
+        if not mol:
+            st.error("❌ Could not parse SMILES string")
+            return None
+        
+        # Check molecule size (very large molecules may fail)
+        num_atoms = mol.GetNumAtoms()
+        if num_atoms > 100:
+            st.warning(f"⚠️ Large molecule ({num_atoms} atoms) - 3D generation may fail")
+        
+        # Add hydrogens for better 3D structure
+        mol_with_h = Chem.AddHs(mol)
+        
+        # Generate 3D coordinates using ETKDG method
+        try:
+            # Use ETKDG version 3 (most robust)
+            params = AllChem.ETKDGv3()
+            params.randomSeed = 42  # For reproducibility
+            params.maxAttempts = 10  # Increase attempts
+            
+            result = AllChem.EmbedMolecule(mol_with_h, params)
+            
+            if result == -1:  # Embedding failed, try alternative
+                st.warning("⚠️ ETKDG failed, trying basic embedding...")
+                result = AllChem.EmbedMolecule(mol_with_h)
+                
+                if result == -1:  # Still failed
+                    st.error("❌ 3D coordinate generation failed")
+                    return None
+                    
+        except Exception as e:
+            st.error(f"❌ Embedding error: {str(e)}")
+            return None
+        
+        # Optimize the 3D structure using force fields
+        try:
+            # Try MMFF94 force field first (more accurate)
+            mmff_props = AllChem.MMFFGetMoleculeProperties(mol_with_h)
+            if mmff_props is not None:
+                AllChem.MMFFOptimizeMolecule(mol_with_h, maxIters=200)
+            else:
+                # Fallback to UFF if MMFF not available
+                AllChem.UFFOptimizeMolecule(mol_with_h, maxIters=200)
+        except Exception as e:
+            st.warning(f"⚠️ Optimization failed (using unoptimized structure): {str(e)}")
+            # Continue with unoptimized structure
+        
+        # Convert to MOL block format for py3Dmol
+        mol_block = Chem.MolToMolBlock(mol_with_h)
+        
+        if not mol_block or len(mol_block) < 50:
+            st.error("❌ Invalid MOL block generated")
+            return None
+            
+        return mol_block
+        
+    except Exception as e:
+        st.error(f"❌ 3D generation error: {str(e)}")
+        import traceback
+        st.error(f"Details: {traceback.format_exc()}")
+        return None
+
+
+
+def render_3d_molecule(smiles: str, style: str = "stick", height: int = 400, width: int = 600, show_labels: bool = True):
+    """
+    Render 3D molecule using py3Dmol and stmol with element symbols
+    """
+    if not PY3DMOL_AVAILABLE:
+        st.warning("⚠️ 3D visualization unavailable. Install: `pip install stmol py3Dmol`")
+        return
+    
+    try:
+        # Generate 3D structure
+        with st.spinner("Generating 3D coordinates..."):
+            mol_block = generate_3d_structure(smiles)
+        
+        if not mol_block:
+            st.error("❌ Could not generate 3D structure")
+            st.info("💡 Try a simpler molecule or check SMILES syntax")
+            return
+        
+        # Parse molecule to get atom information
+        mol = Chem.MolFromSmiles(smiles)
+        mol_with_h = Chem.AddHs(mol)
+        
+        # Generate 3D coordinates
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 42
+        embed_result = AllChem.EmbedMolecule(mol_with_h, params)
+        
+        if embed_result == -1:
+            st.error("❌ Could not generate 3D coordinates")
+            return
+        
+        # Create py3Dmol view
+        view = py3Dmol.view(width=width, height=height)
+        view.addModel(mol_block, 'mol')
+        
+        # Set visualization style
+        if style == "ball_and_stick":
+            view.setStyle({
+                'stick': {'radius': 0.15, 'colorscheme': 'cyanCarbon'}, 
+                'sphere': {'scale': 0.25, 'colorscheme': 'cyanCarbon'}
+            })
+        elif style == "stick":
+            view.setStyle({'stick': {'colorscheme': 'cyanCarbon', 'radius': 0.15}})
+        elif style == "sphere":
+            view.setStyle({'sphere': {'scale': 0.3, 'colorscheme': 'cyanCarbon'}})
+        elif style == "line":
+            view.setStyle({'line': {'colorscheme': 'cyanCarbon'}})
+        elif style == "cross":
+            view.setStyle({'cross': {'linewidth': 2, 'colorscheme': 'cyanCarbon'}})
+        
+        # Add element labels if requested
+        if show_labels:
+            conformer = mol_with_h.GetConformer()
+            
+            # Color coding for elements
+            label_colors = {
+                'C': '#2C3E50',   # Dark gray for carbon
+                'H': '#95A5A6',   # Light gray for hydrogen
+                'O': '#E74C3C',   # Red for oxygen
+                'N': '#3498DB',   # Blue for nitrogen
+                'S': '#F39C12',   # Orange for sulfur
+                'P': '#9B59B6',   # Purple for phosphorus
+                'F': '#1ABC9C',   # Teal for fluorine
+                'Cl': '#27AE60',  # Green for chlorine
+                'Br': '#A0522D',  # Brown for bromine
+                'I': '#4B0082',   # Indigo for iodine
+            }
+            
+            for atom in mol_with_h.GetAtoms():
+                idx = atom.GetIdx()
+                symbol = atom.GetSymbol()
+                pos = conformer.GetAtomPosition(idx)
+                
+                # Skip hydrogen atoms for cleaner view
+                if symbol == 'H':
+                    continue
+                
+                font_color = label_colors.get(symbol, '#000000')
+                
+                # Add label
+                view.addLabel(
+                    symbol,
+                    {
+                        'position': {'x': pos.x, 'y': pos.y, 'z': pos.z},
+                        'fontColor': font_color,
+                        'fontSize': 14,
+                        'showBackground': True,
+                        'backgroundColor': 'white',
+                        'backgroundOpacity': 0.8,
+                        'fontOpacity': 1.0,
+                        'borderThickness': 1,
+                        'borderColor': font_color,
+                        'borderOpacity': 0.5
+                    }
+                )
+        
+        view.setBackgroundColor('white')
+        view.zoomTo()
+        
+        # Display using stmol
+        showmol(view, height=height, width=width)
+        
+        st.success("✅ 3D structure generated successfully!")
+        
+    except Exception as e:
+        st.error(f"❌ Visualization error: {str(e)}")
+        import traceback
+        with st.expander("🐛 Error Details"):
+            st.code(traceback.format_exc())
+
+
+
+
 
 
 # ==============================================================================
@@ -869,6 +1068,7 @@ def main():
                     st.rerun()
 
     # Results display
+    # Results display
     if st.session_state.last_result:
         result = st.session_state.last_result
 
@@ -892,6 +1092,56 @@ def main():
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            # ADD THIS: 3D Molecular Visualization
+            # 3D Molecular Visualization
+            # 3D Molecular Visualization
+            st.subheader("🔬 3D Molecular Structure")
+
+            if PY3DMOL_AVAILABLE:
+                # Create columns for controls and 3D view
+                col_3d_controls, col_3d_view = st.columns([1, 3])
+                
+                with col_3d_controls:
+                    st.markdown("**🎨 Visualization Style:**")
+                    viz_style = st.radio(
+                        "Style",
+                        ["ball_and_stick", "stick", "sphere", "line", "cross"],
+                        index=0,
+                        label_visibility="collapsed",
+                        help="Choose molecular representation style"
+                    )
+                    
+                    st.markdown("---")
+                    
+                    st.markdown("**🏷️ Display Options:**")
+                    
+                    # Toggle for element labels
+                    show_labels = st.checkbox(
+                        "Show Element Symbols",
+                        value=True,
+                        help="Display element symbols (C, O, N, etc.) on atoms"
+                    )
+                    
+                    # Height slider
+                    height_3d = st.slider(
+                        "Viewer Height",
+                        300, 700, 450, 50,
+                        help="Adjust the height of 3D viewer"
+                    )
+                
+                with col_3d_view:
+                    with st.spinner("Generating 3D structure with labels..."):
+                        render_3d_molecule(
+                            result['smiles_used'], 
+                            style=viz_style, 
+                            height=height_3d,
+                            width=700,
+                            show_labels=show_labels
+                        )
+            else:
+                st.warning("⚠️ 3D visualization not available. Install packages:\n``````")
+
 
             # Molecular properties
             if current_smiles:
